@@ -5,6 +5,8 @@
 #include <shellapi.h>
 #include <wincodec.h>
 
+#include <utility>
+
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
@@ -322,32 +324,227 @@ static XMFLOAT2 UVFromPx(int px, int py, uint32_t texW, uint32_t texH) {
   return XMFLOAT2((float)px / (float)texW, (float)py / (float)texH);
 }
 
+
+
+
+// Forward declaration with defaults (definition below has NO defaults)
 static void AddFace(
   std::vector<Vertex>& v,
   std::vector<uint32_t>& i,
   const XMFLOAT3& p0, const XMFLOAT3& p1, const XMFLOAT3& p2, const XMFLOAT3& p3,
   const XMFLOAT3& n,
   const UvRectPx& r,
-  uint32_t texW, uint32_t texH
+  uint32_t texW, uint32_t texH,
+  bool flipU = false,
+  bool flipV = false
+);
+
+// Definition (NO DEFAULTS HERE)
+static void AddFace(
+  std::vector<Vertex>& v,
+  std::vector<uint32_t>& i,
+  const XMFLOAT3& p0, const XMFLOAT3& p1, const XMFLOAT3& p2, const XMFLOAT3& p3,
+  const XMFLOAT3& n,
+  const UvRectPx& r,
+  uint32_t texW, uint32_t texH,
+  bool flipU,
+  bool flipV
 ) {
   XMFLOAT2 uv0 = UVFromPx(r.x,       r.y,       texW, texH);
   XMFLOAT2 uv1 = UVFromPx(r.x + r.w, r.y,       texW, texH);
   XMFLOAT2 uv2 = UVFromPx(r.x + r.w, r.y + r.h, texW, texH);
   XMFLOAT2 uv3 = UVFromPx(r.x,       r.y + r.h, texW, texH);
 
-  uint32_t base = (uint32_t)v.size();
-  v.push_back(Vertex{p0, n, uv0});
-  v.push_back(Vertex{p1, n, uv1});
-  v.push_back(Vertex{p2, n, uv2});
-  v.push_back(Vertex{p3, n, uv3});
+  if (flipU) { std::swap(uv0, uv1); std::swap(uv3, uv2); }
+  if (flipV) { std::swap(uv0, uv3); std::swap(uv1, uv2); }
 
+  uint32_t base = (uint32_t)v.size();
+  v.push_back(Vertex{ p0, n, uv0 });
+  v.push_back(Vertex{ p1, n, uv1 });
+  v.push_back(Vertex{ p2, n, uv2 });
+  v.push_back(Vertex{ p3, n, uv3 });
+
+  // keep your working winding
   i.push_back(base + 0);
   i.push_back(base + 1);
   i.push_back(base + 2);
-
   i.push_back(base + 0);
   i.push_back(base + 2);
   i.push_back(base + 3);
+}
+
+// Head box with 180° UV rotation on: bottom, left, right (front/back remain normal)
+// (keeping your existing behavior that you said looks good)
+static void AddHeadBox_FlippedFaces(
+  std::vector<Vertex>& v,
+  std::vector<uint32_t>& i,
+  XMFLOAT3 center,
+  XMFLOAT3 size,
+  const BoxUv& uv,
+  uint32_t texW, uint32_t texH
+) {
+  const float hx = size.x * 0.5f;
+  const float hy = size.y * 0.5f;
+  const float hz = size.z * 0.5f;
+
+  const float cx = center.x, cy = center.y, cz = center.z;
+
+  XMFLOAT3 LBF{cx - hx, cy - hy, cz - hz};
+  XMFLOAT3 RBF{cx + hx, cy - hy, cz - hz};
+  XMFLOAT3 RTF{cx + hx, cy + hy, cz - hz};
+  XMFLOAT3 LTF{cx - hx, cy + hy, cz - hz};
+
+  XMFLOAT3 LBB{cx - hx, cy - hy, cz + hz};
+  XMFLOAT3 RBB{cx + hx, cy - hy, cz + hz};
+  XMFLOAT3 RTB{cx + hx, cy + hy, cz + hz};
+  XMFLOAT3 LTB{cx - hx, cy + hy, cz + hz};
+
+  // Top (+Y)
+  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0),  uv.top,    texW, texH, false, false);
+
+  // Bottom (-Y) flipped 180°
+  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0,-1, 0),  uv.bottom, texW, texH, true, true);
+
+  // Front (+Z) normal
+  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1),  uv.front,  texW, texH, false, false);
+
+  // Back (-Z) normal
+  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0,-1),  uv.back,   texW, texH, false, false);
+
+  // Right (+X) flipped 180°
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3(1, 0, 0),  uv.right,  texW, texH, true, true);
+
+  // Left (-X) flipped 180°
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1,0, 0),  uv.left,   texW, texH, true, true);
+}
+
+
+// Arm box: swap the side UVs (inner <-> outer)
+// This swaps which texture rect is used on the +X and -X faces.
+static void AddArmBox_SwapSides(
+  std::vector<Vertex>& v,
+  std::vector<uint32_t>& i,
+  XMFLOAT3 center,
+  XMFLOAT3 size,
+  const BoxUv& uv,
+  uint32_t texW, uint32_t texH
+) {
+  const float hx = size.x * 0.5f;
+  const float hy = size.y * 0.5f;
+  const float hz = size.z * 0.5f;
+
+  const float cx = center.x, cy = center.y, cz = center.z;
+
+  XMFLOAT3 LBF{cx - hx, cy - hy, cz - hz};
+  XMFLOAT3 RBF{cx + hx, cy - hy, cz - hz};
+  XMFLOAT3 RTF{cx + hx, cy + hy, cz - hz};
+  XMFLOAT3 LTF{cx - hx, cy + hy, cz - hz};
+
+  XMFLOAT3 LBB{cx - hx, cy - hy, cz + hz};
+  XMFLOAT3 RBB{cx + hx, cy - hy, cz + hz};
+  XMFLOAT3 RTB{cx + hx, cy + hy, cz + hz};
+  XMFLOAT3 LTB{cx - hx, cy + hy, cz + hz};
+
+  // Normal faces
+  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0),  uv.top,    texW, texH);
+  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0,-1, 0),  uv.bottom, texW, texH);
+  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1),  uv.front,  texW, texH);
+  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0,-1),  uv.back,   texW, texH);
+
+  // Swapped sides:
+  // +X face normally uses uv.right, -X uses uv.left
+  // We swap them: +X uses uv.left, -X uses uv.right
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3(1, 0, 0),  uv.left,   texW, texH);  // +X now uses LEFT rect
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1,0, 0),  uv.right,  texW, texH);  // -X now uses RIGHT rect
+}
+
+
+
+static void AddLegBox(
+  std::vector<Vertex>& v,
+  std::vector<uint32_t>& i,
+  XMFLOAT3 center,
+  XMFLOAT3 size,
+  const BoxUv& uv,
+  uint32_t texW, uint32_t texH
+) {
+  const float hx = size.x * 0.5f;
+  const float hy = size.y * 0.5f;
+  const float hz = size.z * 0.5f;
+
+  const float cx = center.x, cy = center.y, cz = center.z;
+
+  XMFLOAT3 LBF{cx - hx, cy - hy, cz - hz};
+  XMFLOAT3 RBF{cx + hx, cy - hy, cz - hz};
+  XMFLOAT3 RTF{cx + hx, cy + hy, cz - hz};
+  XMFLOAT3 LTF{cx - hx, cy + hy, cz - hz};
+
+  XMFLOAT3 LBB{cx - hx, cy - hy, cz + hz};
+  XMFLOAT3 RBB{cx + hx, cy - hy, cz + hz};
+  XMFLOAT3 RTB{cx + hx, cy + hy, cz + hz};
+  XMFLOAT3 LTB{cx - hx, cy + hy, cz + hz};
+
+  // Top / Bottom / Front / Back unchanged
+  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0), uv.top,    texW, texH);
+  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0,-1, 0), uv.bottom, texW, texH);
+  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1), uv.front,  texW, texH);
+  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0,-1), uv.back,   texW, texH);
+
+  // ✅ Swap these:
+  // +X face is player's LEFT side -> use uv.left
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3( 1, 0, 0), uv.left,  texW, texH);
+
+  // -X face is player's RIGHT side -> use uv.right
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1, 0, 0), uv.right, texW, texH);
+}
+
+// ✅ NEW: Arm box that flips ONLY the *outer* arm side face 180°
+// - For the player's RIGHT arm (centered at negative X in our model), the outer face is -X => uv.left
+// - For the player's LEFT arm  (centered at positive X), the outer face is +X => uv.right
+static void AddArmBox_FlipOuterSide180(
+  std::vector<Vertex>& v,
+  std::vector<uint32_t>& i,
+  XMFLOAT3 center,
+  XMFLOAT3 size,
+  const BoxUv& uv,
+  uint32_t texW, uint32_t texH,
+  bool isPlayerRightArm
+) {
+  const float hx = size.x * 0.5f;
+  const float hy = size.y * 0.5f;
+  const float hz = size.z * 0.5f;
+
+  const float cx = center.x, cy = center.y, cz = center.z;
+
+  XMFLOAT3 LBF{cx - hx, cy - hy, cz - hz};
+  XMFLOAT3 RBF{cx + hx, cy - hy, cz - hz};
+  XMFLOAT3 RTF{cx + hx, cy + hy, cz - hz};
+  XMFLOAT3 LTF{cx - hx, cy + hy, cz - hz};
+
+  XMFLOAT3 LBB{cx - hx, cy - hy, cz + hz};
+  XMFLOAT3 RBB{cx + hx, cy - hy, cz + hz};
+  XMFLOAT3 RTB{cx + hx, cy + hy, cz + hz};
+  XMFLOAT3 LTB{cx - hx, cy + hy, cz + hz};
+
+  // Top / Bottom / Front / Back: unchanged
+  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0), uv.top,    texW, texH);
+  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0,-1, 0), uv.bottom, texW, texH);
+  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1), uv.front,  texW, texH);
+  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0,-1), uv.back,   texW, texH);
+
+// Sides: flip ONLY the outer side horizontally (flipU=true, flipV=false)
+if (isPlayerRightArm) {
+  // right arm is at negative X -> outer face is -X (uv.left)
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3( 1, 0, 0), uv.right, texW, texH, false, false); // inner (+X)
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1, 0, 0), uv.left,  texW, texH, true,  false); // outer (-X) mirror
+} else {
+  // left arm is at positive X -> outer face is +X (uv.right)
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3( 1, 0, 0), uv.right, texW, texH, true,  false); // outer (+X) mirror
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1, 0, 0), uv.left,  texW, texH, false, false); // inner (-X)
+}
+
+
+
 }
 
 static void AddBox(
@@ -374,23 +571,12 @@ static void AddBox(
   XMFLOAT3 RTB{cx + hx, cy + hy, cz + hz};
   XMFLOAT3 LTB{cx - hx, cy + hy, cz + hz};
 
-  // Top (+Y)
-  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0), uv.top, texW, texH);
-
-  // Bottom (-Y)
-  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0, -1, 0), uv.bottom, texW, texH);
-
-  // Front (+Z) (player front)
-  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1), uv.front, texW, texH);
-
-  // Back (-Z) (player back)
-  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0, -1), uv.back, texW, texH);
-
-  // Right (+X)
-  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3(1, 0, 0), uv.right, texW, texH);
-
-  // Left (-X)
-  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1, 0, 0), uv.left, texW, texH);
+  AddFace(v, i, LTF, RTF, RTB, LTB, XMFLOAT3(0, 1, 0), uv.top,    texW, texH);
+  AddFace(v, i, LBB, RBB, RBF, LBF, XMFLOAT3(0,-1, 0), uv.bottom, texW, texH);
+  AddFace(v, i, LTB, RTB, RBB, LBB, XMFLOAT3(0, 0, 1), uv.front,  texW, texH);
+  AddFace(v, i, RTF, LTF, LBF, RBF, XMFLOAT3(0, 0,-1), uv.back,   texW, texH);
+  AddFace(v, i, RTB, RTF, RBF, RBB, XMFLOAT3(1, 0, 0), uv.right,  texW, texH);
+  AddFace(v, i, LTF, LTB, LBB, LBF, XMFLOAT3(-1,0, 0), uv.left,   texW, texH);
 }
 
 struct BuiltMesh {
@@ -428,28 +614,30 @@ static BuiltMesh BuildPlayerMesh(const SkinInfo& skin, bool slimArms) {
   const XMFLOAT3 rLegC{-2, 6, 0};
   const XMFLOAT3 lLegC{ 2, 6, 0};
 
-  // Base geometry
-  AddBox(m.vertices, m.indicesBase, headC, headSize, S(UV_Head()), texW, texH);
-  AddBox(m.vertices, m.indicesBase, bodyC, bodySize, S(UV_Torso()), texW, texH);
+// Base geometry
+AddHeadBox_FlippedFaces(m.vertices, m.indicesBase, headC, headSize, S(UV_Head()), texW, texH);
+AddBox(m.vertices, m.indicesBase, bodyC, bodySize, S(UV_Torso()), texW, texH);
 
-  if (armW == 3.0f) AddBox(m.vertices, m.indicesBase, rArmC, armSize, S(UV_RightArmSlim()), texW, texH);
-  else             AddBox(m.vertices, m.indicesBase, rArmC, armSize, S(UV_RightArm()),     texW, texH);
+// ✅ Arms: swap INNER/OUTER side faces (uv.left <-> uv.right)
+if (armW == 3.0f) AddArmBox_SwapSides(m.vertices, m.indicesBase, rArmC, armSize, S(UV_RightArmSlim()), texW, texH);
+else              AddArmBox_SwapSides(m.vertices, m.indicesBase, rArmC, armSize, S(UV_RightArm()),     texW, texH);
 
-  AddBox(m.vertices, m.indicesBase, rLegC, legSize, S(UV_RightLeg()), texW, texH);
+AddLegBox(m.vertices, m.indicesBase, rLegC, legSize, S(UV_RightLeg()), texW, texH);
 
-  if (has64) {
-    if (armW == 3.0f) AddBox(m.vertices, m.indicesBase, lArmC, armSize, S(UV_LeftArmSlim()), texW, texH);
-    else             AddBox(m.vertices, m.indicesBase, lArmC, armSize, S(UV_LeftArm()),     texW, texH);
+if (has64) {
+  if (armW == 3.0f) AddArmBox_SwapSides(m.vertices, m.indicesBase, lArmC, armSize, S(UV_LeftArmSlim()), texW, texH);
+  else              AddArmBox_SwapSides(m.vertices, m.indicesBase, lArmC, armSize, S(UV_LeftArm()),     texW, texH);
 
-    AddBox(m.vertices, m.indicesBase, lLegC, legSize, S(UV_LeftLeg()), texW, texH);
-  } else {
-    // legacy 64x32: left limbs mirror right (approx)
-    AddBox(m.vertices, m.indicesBase, lArmC, armSize, S(UV_RightArm()), texW, texH);
-    AddBox(m.vertices, m.indicesBase, lLegC, legSize, S(UV_RightLeg()), texW, texH);
-  }
+  AddLegBox(m.vertices, m.indicesBase, lLegC, legSize, S(UV_LeftLeg()), texW, texH);
+} else {
+  // legacy 64x32: left limbs mirror right (approx)
+  AddArmBox_SwapSides(m.vertices, m.indicesBase, lArmC, armSize, S(UV_RightArm()), texW, texH);
+  AddLegBox(m.vertices, m.indicesBase, lLegC, legSize, S(UV_RightLeg()), texW, texH);
+}
 
-  // Overlay: only add if any non-transparent pixels exist
-  auto Inflate = [](XMFLOAT3 size, float delta) { return XMFLOAT3(size.x + delta, size.y + delta, size.z + delta); };
+// Overlay: only add if any non-transparent pixels exist
+auto Inflate = [](XMFLOAT3 size, float delta) { return XMFLOAT3(size.x + delta, size.y + delta, size.z + delta); };
+
 
   // Hat
   {
@@ -458,7 +646,8 @@ static BuiltMesh BuildPlayerMesh(const SkinInfo& skin, bool slimArms) {
       AnyNonTransparent(skin, hat.top) || AnyNonTransparent(skin, hat.bottom) ||
       AnyNonTransparent(skin, hat.left) || AnyNonTransparent(skin, hat.right) ||
       AnyNonTransparent(skin, hat.front) || AnyNonTransparent(skin, hat.back);
-    if (present) AddBox(m.vertices, m.indicesOverlay, headC, Inflate(headSize, 0.5f), hat, texW, texH);
+
+    if (present) AddHeadBox_FlippedFaces(m.vertices, m.indicesOverlay, headC, Inflate(headSize, 0.5f), hat, texW, texH);
   }
 
   // Jacket
@@ -478,7 +667,7 @@ static BuiltMesh BuildPlayerMesh(const SkinInfo& skin, bool slimArms) {
       AnyNonTransparent(skin, rs.top) || AnyNonTransparent(skin, rs.bottom) ||
       AnyNonTransparent(skin, rs.left) || AnyNonTransparent(skin, rs.right) ||
       AnyNonTransparent(skin, rs.front) || AnyNonTransparent(skin, rs.back);
-    if (present) AddBox(m.vertices, m.indicesOverlay, rArmC, Inflate(armSize, 0.5f), rs, texW, texH);
+    if (present) AddArmBox_FlipOuterSide180(m.vertices, m.indicesOverlay, rArmC, Inflate(armSize, 0.5f), rs, texW, texH, true);
   }
 
   // Right pants
@@ -499,7 +688,7 @@ static BuiltMesh BuildPlayerMesh(const SkinInfo& skin, bool slimArms) {
         AnyNonTransparent(skin, ls.top) || AnyNonTransparent(skin, ls.bottom) ||
         AnyNonTransparent(skin, ls.left) || AnyNonTransparent(skin, ls.right) ||
         AnyNonTransparent(skin, ls.front) || AnyNonTransparent(skin, ls.back);
-      if (present) AddBox(m.vertices, m.indicesOverlay, lArmC, Inflate(armSize, 0.5f), ls, texW, texH);
+      if (present) AddArmBox_FlipOuterSide180(m.vertices, m.indicesOverlay, lArmC, Inflate(armSize, 0.5f), ls, texW, texH, false);
     }
 
     // Left pants
@@ -865,8 +1054,9 @@ struct App {
   std::string status = "Drag & drop a Minecraft skin .png onto the window.";
   bool showOverlay = true;
   bool pointFilter = true;
-  bool slimArms = false; // <-- NEW
+  bool slimArms = false;
   bool minimized = false;
+  float wheelAccum = 0.0f; // mouse wheel accumulator for camera zoom
 
 
   bool rotating = false;
@@ -917,10 +1107,19 @@ static App* g_app = nullptr;
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-  if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-    return true;
+  const bool imguiHandled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam) != 0;
 
   switch (msg) {
+
+    case WM_MOUSEWHEEL: {
+      if (g_app) {
+        // +1/-1 per notch
+        g_app->wheelAccum += (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
+      }
+      // let ImGui also handle it; we just record it
+      break;
+    }
+
     case WM_SIZE: {
       if (g_app) {
         g_app->minimized = (wParam == SIZE_MINIMIZED);
@@ -932,7 +1131,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
       }
       return 0;
     }
-    
+
     case WM_DROPFILES: {
       if (!g_app) return 0;
       HDROP drop = (HDROP)wParam;
@@ -943,12 +1142,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
       DragFinish(drop);
       return 0;
     }
+
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
   }
-  return DefWindowProcW(hWnd, msg, wParam, lParam);
+
+  // If ImGui handled it, swallow it; otherwise default proc
+  return imguiHandled ? 1 : DefWindowProcW(hWnd, msg, wParam, lParam);
 }
+
 
 // ------------------------------
 // Render
@@ -1043,7 +1246,6 @@ static void Render(App& a) {
     ApplySampler(a);
   }
 
-  // ---- NEW: Slim toggle ----
   if (ImGui::Checkbox("Slim arms (Alex)", &a.slimArms)) {
     RebuildMeshIfSkinLoaded(a);
   }
@@ -1111,58 +1313,59 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     ApplySampler(app);
 
     MSG msg{};
-  bool running = true;
+    bool running = true;
 
-  while (running) {
-    // If minimized, sleep until some window message arrives.
-    // If not minimized, wake up every ~16ms to render (~60fps) OR sooner if there are messages.
-    DWORD timeoutMs = app.minimized ? INFINITE : 16;
-    MsgWaitForMultipleObjectsEx(
-      0, nullptr,
-      timeoutMs,
-      QS_ALLINPUT,
-      MWMO_INPUTAVAILABLE
-    );
+    while (running) {
+      DWORD timeoutMs = app.minimized ? INFINITE : 16;
+      MsgWaitForMultipleObjectsEx(
+        0, nullptr,
+        timeoutMs,
+        QS_ALLINPUT,
+        MWMO_INPUTAVAILABLE
+      );
 
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-      if (msg.message == WM_QUIT) { running = false; break; }
-      TranslateMessage(&msg);
-      DispatchMessageW(&msg);
-    }
-    if (!running) break;
-
-    // Don’t render while minimized (kills the “4 billion cycles” issue)
-    if (app.minimized) { app.rotating = false; continue; }
-
-    // Camera input (avoid fighting ImGui)
-    ImGuiIO& iio = ImGui::GetIO();
-    if (!iio.WantCaptureMouse) {
-      if (iio.MouseWheel != 0.0f) {
-        app.cam.dist = Clamp(app.cam.dist - iio.MouseWheel * 4.0f, 20.0f, 200.0f);
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) { running = false; break; }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
       }
+      if (!running) break;
 
-      if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        if (!app.rotating) {
-          app.rotating = true;
-          GetCursorPos(&app.lastMouse);
-        } else {
-          POINT p{};
-          GetCursorPos(&p);
-          const float dx = (float)(p.x - app.lastMouse.x);
-          const float dy = (float)(p.y - app.lastMouse.y);
-          app.lastMouse = p;
+      if (app.minimized) { app.rotating = false; continue; }
 
-          app.cam.yaw += dx * 0.01f;
-          app.cam.pitch = Clamp(app.cam.pitch + dy * 0.01f, -1.2f, 1.2f);
-        }
-      } else {
-        app.rotating = false;
-      }
+     // Camera input (avoid fighting ImGui)
+ImGuiIO& iio = ImGui::GetIO();
+
+// ✅ Zoom: use our own wheel accumulator (reliable even when ImGui wheel is flaky)
+if (app.wheelAccum != 0.0f) {
+  app.cam.dist = Clamp(app.cam.dist - app.wheelAccum * 4.0f, 20.0f, 200.0f);
+  app.wheelAccum = 0.0f;
+}
+
+// Orbit only when ImGui isn't using the mouse
+if (!iio.WantCaptureMouse) {
+  if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (!app.rotating) {
+      app.rotating = true;
+      GetCursorPos(&app.lastMouse);
+    } else {
+      POINT p{};
+      GetCursorPos(&p);
+      const float dx = (float)(p.x - app.lastMouse.x);
+      const float dy = (float)(p.y - app.lastMouse.y);
+      app.lastMouse = p;
+
+      app.cam.yaw += dx * 0.01f;
+      app.cam.pitch = Clamp(app.cam.pitch + dy * 0.01f, -1.2f, 1.2f);
     }
-
-    Render(app);
+  } else {
+    app.rotating = false;
   }
+}
 
+Render(app);
+
+    }
 
     DragAcceptFiles(hwnd, FALSE);
 
