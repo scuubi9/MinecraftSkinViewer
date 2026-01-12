@@ -3,3 +3,4 @@
 
 
 Needs "DirectXMath" and "imgui" in /external for it to compile.
+Needs "main.cpp" in /src
